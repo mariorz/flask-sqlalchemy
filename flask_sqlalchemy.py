@@ -21,12 +21,14 @@ from flask import _request_ctx_stack, abort
 from flask.signals import Namespace
 from operator import itemgetter
 from threading import Lock
+from sqlalchemy import event
 from sqlalchemy import orm
 from sqlalchemy.orm.exc import UnmappedClassError
 from sqlalchemy.orm.session import Session
 from sqlalchemy.orm.interfaces import MapperExtension, SessionExtension, \
      EXT_CONTINUE
 from sqlalchemy.interfaces import ConnectionProxy
+from sqlalchemy.engine.base import Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.declarative import declarative_base, DeclarativeMeta
 from sqlalchemy.util import to_list
@@ -53,6 +55,32 @@ _signals = Namespace()
 
 models_committed = _signals.signal('models-committed')
 before_models_committed = _signals.signal('before-models-committed')
+
+
+
+###
+
+
+
+@event.listens_for(Engine, "before_cursor_execute")
+def _before_cursor_execute(conn, cursor, stmt, parameters, context, execmany):
+    setattr(conn, 'start_timer', _timer())
+
+@event.listens_for(Engine, "after_cursor_execute")
+def _after_cursor_execute(conn, cursor, statement, parameters, context, execmany):
+    ctx = connection_stack.top
+    if ctx is not None:
+        queries = getattr(ctx, 'sqlalchemy_queries', None)
+        if queries is None:
+            queries = []
+            setattr(ctx, 'sqlalchemy_queries', queries)
+        queries.append(_DebugQueryTuple((
+            statement, parameters, conn.start_timer*1000, _timer()*1000,
+            _calling_context(ctx.app.import_name))))
+    delattr(conn, 'start_timer')
+
+###
+
 
 
 def _make_table(db):
@@ -139,20 +167,7 @@ class _ConnectionDebugProxy(ConnectionProxy):
 
     def cursor_execute(self, execute, cursor, statement, parameters,
                        context, executemany):
-        start = _timer()
-        try:
-            return execute(cursor, statement, parameters, context)
-        finally:
-            ctx = connection_stack.top
-            if ctx is not None:
-                queries = getattr(ctx, 'sqlalchemy_queries', None)
-                if queries is None:
-                    queries = []
-                    setattr(ctx, 'sqlalchemy_queries', queries)
-                queries.append(_DebugQueryTuple((
-                    statement, parameters, start, _timer(),
-                    _calling_context(self.app_package))))
-
+        pass
 
 class _SignalTrackingMapperExtension(MapperExtension):
 
